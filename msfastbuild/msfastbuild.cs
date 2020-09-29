@@ -30,11 +30,11 @@ namespace msfastbuild
 		HelpText = "Configuration to build.")]
 		public string Config { get; set; }
 
-		[Option('f', "platform", DefaultValue = "Win32",
+		[Option('f', "platform", DefaultValue = "x64",
 		HelpText = "Platform to build.")]
 		public string Platform { get; set; }
 
-		[Option('a', "fbargs", DefaultValue = "-dist",
+		[Option('a', "fbargs", DefaultValue = "-dist",			//如果是命令行直接运行，需要用""包含其值。
 		HelpText = "Arguments that pass through to FASTBuild.")]
 		public string FBArgs { get; set; }
 
@@ -68,7 +68,7 @@ namespace msfastbuild
 		static public string VCExePath = "";
 		static public string BFFOutputFilePath = "fbuild.bff";
 		static public Options CommandLineOptions = new Options();
-		static public string WindowsSDKTarget = "10.0.10240.0";
+		static public string WindowsSDKTarget = "10.0.18362.0";
 		static public MSFBProject CurrentProject;
 		static public Assembly CPPTasksAssembly;
 		static public string PreBuildBatchFile = "";
@@ -94,14 +94,18 @@ namespace msfastbuild
 
 		static void Main(string[] args)
 		{
+			//Console.WriteLine("BEGIN:");
+			//foreach (string a in args)
+			//	Console.WriteLine(a);
+			//Console.WriteLine();
+			//Console.WriteLine("END.");
 			Parser parser = new Parser();
-			if (!parser.ParseArguments(args, CommandLineOptions))
-			{
-				Console.WriteLine(CommandLineOptions.GetUsage());
-				return;
-			}
-
-			if (string.IsNullOrEmpty(CommandLineOptions.Solution) && string.IsNullOrEmpty(CommandLineOptions.Project))
+            if (!parser.ParseArguments(args, CommandLineOptions))
+            {
+                Console.WriteLine(CommandLineOptions.GetUsage());
+                return;
+            }
+            if (string.IsNullOrEmpty(CommandLineOptions.Solution) && string.IsNullOrEmpty(CommandLineOptions.Project))
 			{
 				Console.WriteLine("No solution or project provided!");
 				Console.WriteLine(CommandLineOptions.GetUsage());
@@ -190,7 +194,7 @@ namespace msfastbuild
 
 				BFFOutputFilePath = Path.GetDirectoryName(CurrentProject.Proj.FullPath) + "\\" + Path.GetFileName(CurrentProject.Proj.FullPath) + "_" + CommandLineOptions.Config.Replace(" ", "") + "_" + CommandLineOptions.Platform.Replace(" ", "") + ".bff";
 				GenerateBffFromVcxproj(CommandLineOptions.Config, CommandLineOptions.Platform);
-
+				Console.WriteLine("BFF: {0}\r\n", BFFOutputFilePath);
 				if (!CommandLineOptions.GenerateOnly)
 				{
 					if (HasCompileActions && !ExecuteBffFile(CurrentProject.Proj.FullPath, CommandLineOptions.Platform))
@@ -425,7 +429,7 @@ namespace msfastbuild
 				case "Application": BuildOutput = BuildType.Application; break;				
 			}
 
-			PlatformToolsetVersion = ActiveProject.GetProperty("PlatformToolsetVersion").EvaluatedValue;
+			//PlatformToolsetVersion = ActiveProject.GetProperty("PlatformToolsetVersion").EvaluatedValue;
 
 			string OutDir = ActiveProject.GetProperty("OutDir").EvaluatedValue;
 			string IntDir = ActiveProject.GetProperty("IntDir").EvaluatedValue;
@@ -470,8 +474,10 @@ namespace msfastbuild
 			CompilerString.Append("\t\t'$Root$/c1.dll'\n");
 			CompilerString.Append("\t\t'$Root$/c1xx.dll'\n");
 			CompilerString.Append("\t\t'$Root$/c2.dll'\n");
+			CompilerString.Append("\t\t'$Root$/atlprov.dll'\n");// Only needed if using ATL
 
-			if(File.Exists(CompilerRoot + "1033/clui.dll")) //Check English first...
+
+			if (File.Exists(CompilerRoot + "1033/clui.dll")) //Check English first...
 			{
 				CompilerString.Append("\t\t'$Root$/1033/clui.dll'\n");
 			}
@@ -482,27 +488,33 @@ namespace msfastbuild
 				if(cluiDirectories.Any())
 				{
 					CompilerString.AppendFormat("\t\t'$Root$/{0}/clui.dll'\n", Path.GetFileName(cluiDirectories.First()));
+
+					CompilerString.AppendFormat(string.Format("\t\t'$Root$/{0}/mspft{1}ui.dll'\n", Path.GetFileName(cluiDirectories.First()), PlatformToolsetVersion));  // Localized messages for static analysis https://www.fastbuild.org/docs/functions/compiler.html
+
 				}
 			}
 			
 			CompilerString.Append("\t\t'$Root$/mspdbsrv.exe'\n");
-			//CompilerString.Append("\t\t'$Root$/mspdbcore.dll'\n");
+			CompilerString.Append("\t\t'$Root$/mspdbcore.dll'\n");
 
-			//CompilerString.AppendFormat("\t\t'$Root$/mspft{0}.dll'\n", PlatformToolsetVersion);
-			//CompilerString.AppendFormat("\t\t'$Root$/msobj{0}.dll'\n", PlatformToolsetVersion);
-			//CompilerString.AppendFormat("\t\t'$Root$/mspdb{0}.dll'\n", PlatformToolsetVersion);
-			//CompilerString.AppendFormat("\t\t'$VSBasePath$/VC/redist/{0}/Microsoft.VC{1}.CRT/msvcp{1}.dll'\n", Platform == "Win32" ? "x86" : "x64", PlatformToolsetVersion);
-			//CompilerString.AppendFormat("\t\t'$VSBasePath$/VC/redist/{0}/Microsoft.VC{1}.CRT/vccorlib{1}.dll'\n", Platform == "Win32" ? "x86" : "x64", PlatformToolsetVersion);
+			CompilerString.AppendFormat("\t\t'$Root$/mspft{0}.dll'\n", PlatformToolsetVersion);
+			CompilerString.AppendFormat("\t\t'$Root$/msobj{0}.dll'\n", PlatformToolsetVersion);
+			CompilerString.AppendFormat("\t\t'$Root$/mspdb{0}.dll'\n", PlatformToolsetVersion);
+			CompilerString.AppendFormat("\t\t'$VCBasePath$/redist/MSVC/14.27.29016/{0}/Microsoft.VC142.CRT/msvcp{1}.dll'\n", Platform == "Win32" ? "x86" : "x64", PlatformToolsetVersion);
+			CompilerString.AppendFormat("\t\t'$VCBasePath$/redist/MSVC/14.27.29016/{0}/Microsoft.VC142.CRT/vccorlib{1}.dll'\n", Platform == "Win32" ? "x86" : "x64", PlatformToolsetVersion);
+			CompilerString.AppendFormat("\t\t'$VCBasePath$/redist/MSVC/14.27.29016/{0}/Microsoft.VC142.CRT/vcruntime{1}.dll'\n", Platform == "Win32" ? "x86" : "x64", PlatformToolsetVersion);
+			CompilerString.AppendFormat("\t\t'$VCBasePath$/redist/MSVC/14.27.29016/{0}/Microsoft.VC142.CRT/vcruntime{1}_1.dll'\n", Platform == "Win32" ? "x86" : "x64", PlatformToolsetVersion);
+			CompilerString.AppendFormat("\t\t'$Root$/tbbmalloc.dll'\n");
 
-			AddExtraDlls(CompilerString, CompilerRoot, "msobj*.dll");
-			AddExtraDlls(CompilerString, CompilerRoot, "mspdb*.dll");
-			AddExtraDlls(CompilerString, CompilerRoot, "mspft*.dll");
-			AddExtraDlls(CompilerString, CompilerRoot, "msvcp*.dll");
-			AddExtraDlls(CompilerString, CompilerRoot, "tbbmalloc.dll");
-			AddExtraDlls(CompilerString, CompilerRoot, "vcmeta.dll");
-			AddExtraDlls(CompilerString, CompilerRoot, "vcruntime*.dll");
+            //AddExtraDlls(CompilerString, CompilerRoot, "msobj*.dll");
+            //AddExtraDlls(CompilerString, CompilerRoot, "mspdb*.dll");
+            //AddExtraDlls(CompilerString, CompilerRoot, "mspft*.dll");
+            //AddExtraDlls(CompilerString, CompilerRoot, "msvcp*.dll");
+            //AddExtraDlls(CompilerString, CompilerRoot, "tbbmalloc.dll");
+            //AddExtraDlls(CompilerString, CompilerRoot, "vcmeta.dll");
+            //AddExtraDlls(CompilerString, CompilerRoot, "vcruntime*.dll");
 
-			CompilerString.Append("\t}\n"); //End extra files
+            CompilerString.Append("\t}\n"); //End extra files
 			CompilerString.Append("}\n\n"); //End compiler
 
 			string rcPath = "\\bin\\" + WindowsSDKTarget + "\\x64\\rc.exe";
