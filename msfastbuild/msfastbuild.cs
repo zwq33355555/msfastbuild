@@ -13,6 +13,9 @@ using System.Text;
 using Microsoft.Build.Evaluation;
 using Microsoft.Build.Construction;
 using Microsoft.Build.Utilities;
+using System.Diagnostics;
+using System.Text.RegularExpressions;
+using System.Runtime.InteropServices;
 
 namespace msfastbuild
 {
@@ -26,15 +29,19 @@ namespace msfastbuild
 		HelpText = "Path of .sln file which contains the projects.")]
 		public string Solution { get; set; }
 
-		[Option('c', "config", DefaultValue = "Debug",
-		HelpText = "Configuration to build.")]
+		[Option('c', "config", DefaultValue = "",
+		HelpText = "Config file to build.")]
 		public string Config { get; set; }
 
 		[Option('f', "platform", DefaultValue = "x64",
-		HelpText = "Platform to build.")]
+		HelpText = "Platform to build: win32, x64")]
 		public string Platform { get; set; }
 
-		[Option('a', "fbargs", DefaultValue = "-dist",			//如果是命令行直接运行，需要用""包含其值。
+		[Option('v', "vs", DefaultValue = "vs2019",		//指定
+		HelpText = "visual studio version: vs2017, vs2019")]
+		public string VisualStudioVersion { get; set; }
+
+		[Option('a', "fbargs", DefaultValue = "-dist -ide -clean",
 		HelpText = "Arguments that pass through to FASTBuild.")]
 		public string FBArgs { get; set; }
 
@@ -46,13 +53,18 @@ namespace msfastbuild
 		HelpText = "Regenerate bff file even when the project hasn't changed.")]
 		public bool AlwaysRegenerate { get; set; }
 
-		[Option('b', "fbpath", DefaultValue = @"FBuild.exe",
+		[Option('b', "fbpath", DefaultValue = "",
 		HelpText = "Path to FASTBuild executable.")]
 		public string FBPath { get; set; }
 
 		[Option('u', "unity", DefaultValue = false,
 		HelpText = "Whether to combine files into a unity step. May substantially improve compilation time, but not all projects are suitable.")]
 		public bool UseUnity { get; set; }
+
+		[OptionList('t', "thirdparty", Separator = '|', DefaultValue = new string[] { }, 
+			HelpText = "Additional thirdparty files (usually dlls) required by the compiler. Not ends with slash." )]
+		public IList<string> ThirdParty { get; set; }
+		 
 
 		[HelpOption]
 		public string GetUsage()
@@ -61,14 +73,52 @@ namespace msfastbuild
 		}
 	}
 
+	/// <summary>
+	/// Available compiler toolchains on Windows platform
+	/// </summary>
+	public enum WindowsCompiler
+	{
+		/// <summary>
+		/// Use the default compiler. A specific value will always be used outside of configuration classes.
+		/// </summary>
+		Default,
+
+		/// <summary>
+		/// Use Clang for Windows, using the clang-cl driver.
+		/// </summary>
+		Clang,
+
+		/// <summary>
+		/// Use the Intel C++ compiler
+		/// </summary>
+		Intel,
+
+		/// <summary>
+		/// Visual Studio 2015 (Visual C++ 14.0)
+		/// </summary>
+		VisualStudio2015,
+		
+		/// <summary>
+		/// Visual Studio 2017 (Visual C++ 15.0)
+		/// </summary>
+		VisualStudio2017,
+
+		/// <summary>
+		/// Visual Studio 2019 (Visual C++ 16.0)
+		/// </summary>
+		VisualStudio2019,
+	}
+
 	public class msfastbuild
 	{
-		static public string PlatformToolsetVersion = "140";
+		static public string PlatformToolsetVersion = "140";    //vs2015, vs2017, vs2019 都是140
+		static WindowsCompiler Compiler = WindowsCompiler.Default;
+
 		static public string VCBasePath = "";
 		static public string VCExePath = "";
 		static public string BFFOutputFilePath = "fbuild.bff";
 		static public Options CommandLineOptions = new Options();
-		static public string WindowsSDKTarget = "10.0.18362.0";
+        static public string WindowsSDKTarget = ""; //10.0.18362.0
 		static public MSFBProject CurrentProject;
 		static public Assembly CPPTasksAssembly;
 		static public string PreBuildBatchFile = "";
@@ -76,7 +126,7 @@ namespace msfastbuild
 		static public string SolutionDir = "";
 		static public bool HasCompileActions = true;
 
-		public enum BuildType
+	public enum BuildType
 		{
 		    Application,
 		    StaticLib,
@@ -92,13 +142,9 @@ namespace msfastbuild
 			public string AdditionalLinkInputs = "";
 		}
 
+
 		static void Main(string[] args)
 		{
-			//Console.WriteLine("BEGIN:");
-			//foreach (string a in args)
-			//	Console.WriteLine(a);
-			//Console.WriteLine();
-			//Console.WriteLine("END.");
 			Parser parser = new Parser();
             if (!parser.ParseArguments(args, CommandLineOptions))
             {
@@ -111,6 +157,22 @@ namespace msfastbuild
 				Console.WriteLine(CommandLineOptions.GetUsage());
 				return;
 			}
+
+			if (CommandLineOptions.VisualStudioVersion == "vs2019")
+			{
+				Compiler = WindowsCompiler.VisualStudio2019;
+			}
+			else if (CommandLineOptions.VisualStudioVersion == "vs2017")
+			{
+				Compiler = WindowsCompiler.VisualStudio2017;
+			}
+			else
+			{
+				Console.WriteLine("Unsupport Complier!");
+				Console.WriteLine(CommandLineOptions.GetUsage());
+				return;
+			}
+
 
 			List <string> ProjectsToBuild = new List<string>();
 			if (!string.IsNullOrEmpty(CommandLineOptions.Solution) && File.Exists(CommandLineOptions.Solution))
@@ -141,7 +203,7 @@ namespace msfastbuild
 				catch (Exception e)
 				{
 					Console.WriteLine("Failed to parse solution file " + CommandLineOptions.Solution + "!");
-					Console.WriteLine("Exception: " + e.Message);
+					Console.WriteLine("Exception: " + e.ToString());
 					return;
 				}
 			}
@@ -197,7 +259,7 @@ namespace msfastbuild
 				Console.WriteLine("BFF: {0}\r\n", BFFOutputFilePath);
 				if (!CommandLineOptions.GenerateOnly)
 				{
-					if (HasCompileActions && !ExecuteBffFile(CurrentProject.Proj.FullPath, CommandLineOptions.Platform))
+					if (HasCompileActions && !ExecuteBffFile(CurrentProject.Proj.FullPath))
 						break;
 					else
 						ProjectsBuilt++;
@@ -284,45 +346,52 @@ namespace msfastbuild
 				return true;
 		}
 
-		static public bool ExecuteBffFile(string ProjectPath, string Platform)
+		static bool ExecuteBffFile(string ProjectPath)
 		{
 			string projectDir = Path.GetDirectoryName(ProjectPath) + "\\";
 
-			string BatchFileText = "@echo off\n"
-				+ "%comspec% /c \"\"" + VCBasePath + "Auxiliary\\Build\\vcvarsall.bat\" "
-				+ (Platform == "Win32" ? "x86" : "x64") + " " + WindowsSDKTarget
-				+ " && \"" + CommandLineOptions.FBPath  +"\" %*\"";
 
-		#if NULL_FASTBUILD_OUTPUT
-			BatchFileText += " > nul";
-		#endif
+            //Interesting flags for FASTBuild: -nostoponerror, -verbose, -monitor (if FASTBuild Monitor Visual Studio Extension is installed!)
+            // Yassine: The -clean is to bypass the FastBuild internal dependencies checks (cached in the fdb) as it could create some conflicts with UBT.
+            //			Basically we want FB to stupidly compile what UBT tells it to.
+            //string FBCommandLine = string.Format("-monitor -summary -dist -clean -ide -config \"{0}\"", BFFOutputFilePath);
+            string FBCommandLine = string.Format("-summary {0} -config \"{1}\"", CommandLineOptions.FBArgs, BFFOutputFilePath);
 
-			File.WriteAllText(projectDir + "fb.bat", BatchFileText);
+            ProcessStartInfo FBStartInfo = new ProcessStartInfo(string.IsNullOrEmpty(CommandLineOptions.FBPath) ? "fbuild.exe" : CommandLineOptions.FBPath, FBCommandLine);
 
+			FBStartInfo.UseShellExecute = false;
+			FBStartInfo.WorkingDirectory = projectDir;
 			Console.WriteLine("Building " + Path.GetFileNameWithoutExtension(ProjectPath));
 
 			try
 			{
-				System.Diagnostics.Process FBProcess = new System.Diagnostics.Process();
-				FBProcess.StartInfo.FileName = projectDir + "fb.bat";
-				FBProcess.StartInfo.Arguments = "-config \"" + BFFOutputFilePath + "\" " + CommandLineOptions.FBArgs;
-				FBProcess.StartInfo.RedirectStandardOutput = true;
-				FBProcess.StartInfo.UseShellExecute = false;
-				FBProcess.StartInfo.WorkingDirectory = projectDir;
-				FBProcess.StartInfo.StandardOutputEncoding = Console.OutputEncoding;
+				Process FBProcess = new Process();
+				FBProcess.StartInfo = FBStartInfo;
 
-				FBProcess.Start();
-				while (!FBProcess.StandardOutput.EndOfStream)
+				FBStartInfo.RedirectStandardError = true;
+				FBStartInfo.RedirectStandardOutput = true;
+				FBProcess.EnableRaisingEvents = true;
+
+				DataReceivedEventHandler OutputEventHandler = (Sender, Args) =>
 				{
-				    Console.Write(FBProcess.StandardOutput.ReadLine() + "\n");
-				}
+					if (Args.Data != null)
+						Console.WriteLine(Args.Data);
+				};
+
+				FBProcess.OutputDataReceived += OutputEventHandler;
+				FBProcess.ErrorDataReceived += OutputEventHandler;
+				Console.WriteLine("RUN: {0} {1}", FBStartInfo.FileName, FBStartInfo.Arguments);
+				FBProcess.Start();
+
+				FBProcess.BeginOutputReadLine();
+				FBProcess.BeginErrorReadLine();
+
 				FBProcess.WaitForExit();
 				return FBProcess.ExitCode == 0;
 			}
 			catch (Exception e)
 			{
-				Console.WriteLine("Failed to launch FASTBuild!");
-				Console.WriteLine("Exception: " + e.Message);
+				Console.WriteLine("Exception launching fbuild process. Is it in your path?" + e.ToString());
 				return false;
 			}
 		}
@@ -408,10 +477,26 @@ namespace msfastbuild
 			string[] dllFiles = Directory.GetFiles(rootDir, pattern);
 			foreach (string dllFile in dllFiles)
 			{
-				outputString.AppendFormat("\t\t'$Root$/{0}'\n", Path.GetFileName(dllFile));
+				outputString.AppendFormat("\t\t'$Root$\\{0}'\n", Path.GetFileName(dllFile));
 			}
 		}
 
+		static private void AddExtraFiles(StringBuilder outputString, string rootDir)
+		{
+			var numericDirectories = Directory.GetDirectories(rootDir);
+			if (numericDirectories.Any())
+			{
+				foreach (var dir in numericDirectories)
+				{
+					AddExtraFiles(outputString, dir);	//递归
+				}
+			}
+			string[] files = Directory.GetFiles(rootDir);
+			foreach (string aFile in files)
+			{
+				outputString.AppendFormat("\t\t'{0}'\n", aFile);
+			}
+		}
 		static private void GenerateBffFromVcxproj(string Config, string Platform)
 		{
 			Project ActiveProject = CurrentProject.Proj;
@@ -469,17 +554,17 @@ namespace msfastbuild
 
 			string CompilerRoot = VCExePath;
 			CompilerString.Append("\t.Root = '$VCExePath$'\n");
-			CompilerString.Append("\t.Executable = '$Root$/cl.exe'\n");
+			CompilerString.Append("\t.Executable = '$Root$\\cl.exe'\n");
 			CompilerString.Append("\t.ExtraFiles =\n\t{\n");
-			CompilerString.Append("\t\t'$Root$/c1.dll'\n");
-			CompilerString.Append("\t\t'$Root$/c1xx.dll'\n");
-			CompilerString.Append("\t\t'$Root$/c2.dll'\n");
-			CompilerString.Append("\t\t'$Root$/atlprov.dll'\n");// Only needed if using ATL
+			CompilerString.Append("\t\t'$Root$\\c1.dll'\n");
+			CompilerString.Append("\t\t'$Root$\\c1xx.dll'\n");
+			CompilerString.Append("\t\t'$Root$\\c2.dll'\n");
+			CompilerString.Append("\t\t'$Root$\\atlprov.dll'\n");// Only needed if using ATL
 
 
-			if (File.Exists(CompilerRoot + "1033/clui.dll")) //Check English first...
+			if (File.Exists(CompilerRoot + "1033\\clui.dll")) //Check English first...
 			{
-				CompilerString.Append("\t\t'$Root$/1033/clui.dll'\n");
+				CompilerString.Append("\t\t'$Root$\\1033\\clui.dll'\n");
 			}
 			else
 			{
@@ -487,34 +572,60 @@ namespace msfastbuild
 				var cluiDirectories = numericDirectories.Where(d => Directory.GetFiles(d, "clui.dll").Any());
 				if(cluiDirectories.Any())
 				{
-					CompilerString.AppendFormat("\t\t'$Root$/{0}/clui.dll'\n", Path.GetFileName(cluiDirectories.First()));
-
-					CompilerString.AppendFormat(string.Format("\t\t'$Root$/{0}/mspft{1}ui.dll'\n", Path.GetFileName(cluiDirectories.First()), PlatformToolsetVersion));  // Localized messages for static analysis https://www.fastbuild.org/docs/functions/compiler.html
+					CompilerString.AppendFormat("\t\t'$Root$\\{0}\\clui.dll'\n", Path.GetFileName(cluiDirectories.First()));
+					CompilerString.AppendFormat(string.Format("\t\t'$Root$\\{0}\\mspft{1}ui.dll'\n", Path.GetFileName(cluiDirectories.First()), PlatformToolsetVersion));  // Localized messages for static analysis https://www.fastbuild.org/docs/functions/compiler.html
 
 				}
 			}
 			
-			CompilerString.Append("\t\t'$Root$/mspdbsrv.exe'\n");
-			CompilerString.Append("\t\t'$Root$/mspdbcore.dll'\n");
+			CompilerString.Append("\t\t'$Root$\\mspdbsrv.exe'\n");
+			CompilerString.Append("\t\t'$Root$\\mspdbcore.dll'\n");
 
-			CompilerString.AppendFormat("\t\t'$Root$/mspft{0}.dll'\n", PlatformToolsetVersion);
-			CompilerString.AppendFormat("\t\t'$Root$/msobj{0}.dll'\n", PlatformToolsetVersion);
-			CompilerString.AppendFormat("\t\t'$Root$/mspdb{0}.dll'\n", PlatformToolsetVersion);
-			CompilerString.AppendFormat("\t\t'$VCBasePath$/redist/MSVC/14.27.29016/{0}/Microsoft.VC142.CRT/msvcp{1}.dll'\n", Platform == "Win32" ? "x86" : "x64", PlatformToolsetVersion);
-			CompilerString.AppendFormat("\t\t'$VCBasePath$/redist/MSVC/14.27.29016/{0}/Microsoft.VC142.CRT/vccorlib{1}.dll'\n", Platform == "Win32" ? "x86" : "x64", PlatformToolsetVersion);
-			CompilerString.AppendFormat("\t\t'$VCBasePath$/redist/MSVC/14.27.29016/{0}/Microsoft.VC142.CRT/vcruntime{1}.dll'\n", Platform == "Win32" ? "x86" : "x64", PlatformToolsetVersion);
-			CompilerString.AppendFormat("\t\t'$VCBasePath$/redist/MSVC/14.27.29016/{0}/Microsoft.VC142.CRT/vcruntime{1}_1.dll'\n", Platform == "Win32" ? "x86" : "x64", PlatformToolsetVersion);
-			CompilerString.AppendFormat("\t\t'$Root$/tbbmalloc.dll'\n");
+			CompilerString.AppendFormat("\t\t'$Root$\\mspft{0}.dll'\n", PlatformToolsetVersion);
+			CompilerString.AppendFormat("\t\t'$Root$\\msobj{0}.dll'\n", PlatformToolsetVersion);
+			CompilerString.AppendFormat("\t\t'$Root$\\mspdb{0}.dll'\n", PlatformToolsetVersion);
 
-            //AddExtraDlls(CompilerString, CompilerRoot, "msobj*.dll");
-            //AddExtraDlls(CompilerString, CompilerRoot, "mspdb*.dll");
-            //AddExtraDlls(CompilerString, CompilerRoot, "mspft*.dll");
-            //AddExtraDlls(CompilerString, CompilerRoot, "msvcp*.dll");
-            //AddExtraDlls(CompilerString, CompilerRoot, "tbbmalloc.dll");
-            //AddExtraDlls(CompilerString, CompilerRoot, "vcmeta.dll");
-            //AddExtraDlls(CompilerString, CompilerRoot, "vcruntime*.dll");
+			var redistDirs = Directory.GetDirectories(VCBasePath.ToString() + "Redist\\MSVC\\", "*", SearchOption.TopDirectoryOnly);
 
-            CompilerString.Append("\t}\n"); //End extra files
+			if (redistDirs.Length > 0)
+			{
+				Regex regex = new Regex(@"\d{2}\.\d{2}\.\d{5}$");
+				string redistDir = redistDirs.First((s) =>
+				{
+					return regex.IsMatch(s);
+				});
+				if (Compiler == WindowsCompiler.VisualStudio2019)
+				{
+					//CompilerString.AppendFormat("\t\t'{0}\\x64\\Microsoft.VC142.CRT\\msvcp{1}.dll'\n", redistDir, PlatformToolsetVersion);
+					//CompilerString.AppendFormat("\t\t'{0}\\x64\\Microsoft.VC142.CRT\\vccorlib{1}.dll'\n", redistDir, PlatformToolsetVersion);
+					//CompilerString.AppendFormat("\t\t'{0}\\x64\\Microsoft.VC142.CRT\\vcruntime{1}.dll'\n", redistDir, PlatformToolsetVersion);
+					//CompilerString.AppendFormat("\t\t'{0}\\x64\\Microsoft.VC142.CRT\\vcruntime{1}_1.dll'\n", redistDir, PlatformToolsetVersion); // Required as of 16.5.1 (14.25.28610)
+				}
+				else if (Compiler  == WindowsCompiler.VisualStudio2017)
+				{
+					//VS 2017 is really confusing in terms of version numbers and paths so these values might need to be modified depending on what version of the tool chain you
+					// chose to install.
+					CompilerString.AppendFormat("\t\t'{0}\\x64\\Microsoft.VC141.CRT\\msvcp{1}.dll'\n", redistDir, PlatformToolsetVersion);
+					CompilerString.AppendFormat("\t\t'{0}\\x64\\Microsoft.VC141.CRT\\vccorlib{1}.dll'\n", redistDir, PlatformToolsetVersion);
+				}
+			}
+			CompilerString.AppendFormat("\t\t'$Root$\\tbbmalloc.dll'\n");
+
+			//导入依赖目录
+			foreach (string path in CommandLineOptions.ThirdParty)
+			{
+				string dir = path.Replace(Path.AltDirectorySeparatorChar, Path.DirectorySeparatorChar);  //统一到windows的反斜杠 \
+				if (dir.Last() != Path.DirectorySeparatorChar)
+					AddExtraFiles(CompilerString, path);
+				else
+					AddExtraFiles(CompilerString, Path.GetDirectoryName(dir));
+			}
+			//foreach (string path in FASTBuild_Toolchain)
+			//{
+			//	AddExtraFiles(CompilerString, path);
+			//}			//
+			
+			CompilerString.Append("\t}\n"); //End extra files
 			CompilerString.Append("}\n\n"); //End compiler
 
 			string rcPath = "\\bin\\" + WindowsSDKTarget + "\\x64\\rc.exe";
